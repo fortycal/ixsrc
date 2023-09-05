@@ -2,5 +2,6 @@
 /ldap/etc
 /slim
 /ImageMosaicAdapter
+/vet_algo
 /dcm4che
 /wait-for-it
