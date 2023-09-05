@@ -1,0 +1,6 @@
+/var/log/vetscan/*.log {
+   daily
+   rotate 20
+   missingok
+   compress
+}

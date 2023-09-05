@@ -1,0 +1,6 @@
+# Exclude independent git projects and Docker temp artifacts
+/ldap/etc
+/slim
+/ImageMosaicAdapter
+/dcm4che
+/wait-for-it

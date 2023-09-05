@@ -1,0 +1,144 @@
+version: '3.7'
+
+volumes:
+  kafka_data:
+    driver: local
+  db_data: {}
+  arc_data: {}
+  ldap_data: {}
+  ldap_config: {}
+
+services:
+  fluentd:
+    build:
+      context: ./fluentd
+      dockerfile: Dockerfile
+    volumes:
+      - type: bind
+        source: ./fluentd/conf
+        target: /fluentd/etc
+        consistency: consistent
+    network_mode: host
+    healthcheck:
+      test: "echo -e '\\035\\nquit' | telnet localhost 24224 && exit 0 || exit 1"
+      # test: "curl -s -f localhost:24224 || exit 1"
+      interval: 5s
+      timeout: 2s
+      retries: 5
+    logging:
+      driver: syslog
+      options: 
+        tag: pacs_fluentd
+
+  kafka:
+    image: docker.io/bitnami/kafka:3.5
+    network_mode: host
+    volumes:
+      - "kafka_data:/bitnami"
+    environment:
+      # KRaft settings
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@localhost:9093
+      # Listeners
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:29092,CONTROLLER://localhost:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092,PLAINTEXT_HOST://localhost:29092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+    depends_on:
+      fluentd:
+        condition: service_healthy
+    logging:
+      driver: fluentd
+      options: 
+        tag: pacs_kafka
+
+  app:
+    build:
+      context: ./slim/.
+      dockerfile: Dockerfile
+      target: app
+    ports:
+      - "8008:8008"
+    user: nginx
+    depends_on:
+      - arc
+    logging:
+      driver: fluentd
+      options:
+        tag: pacs_app
+
+  ldap:
+    image: dcm4che/slapd-dcm4chee:2.6.0-26.0
+    expose:
+      - 389
+    env_file: docker-compose.env
+    depends_on:
+      - arc
+    volumes:
+      - ldap_data:/var/lib/openldap/openldap-data
+      - ldap_config:/etc/openldap/slapd.d
+      - ./ldap/etc/openldap/data/modify-dcmRemapRetrieveURL.ldif:/etc/openldap/data/modify-dcmRemapRetrieveURL.ldif:ro
+      - ./ldap/etc/openldap/data/modify-dcmWebServicePath.ldif:/etc/openldap/data/modify-dcmWebServicePath.ldif:ro
+    logging:
+      driver: fluentd
+      options:
+        tag: pacs_ldap
+
+  db:
+    # image: dcm4che/postgres-dcm4chee:14.2-26
+    build:
+      context: ./db/.
+      dockerfile: Dockerfile
+    command: ["postgres", "-c", "config_file=/postgresql.conf"]
+    ports:
+      - 5432:5432
+    env_file: docker-compose.env
+    depends_on:
+      fluentd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --dbname=pacsdb --username=pacs"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    logging:
+      driver: fluentd
+      options:
+        tag: pacs_db
+
+  arc:
+    image: dcm4che/dcm4chee-arc-psql:5.26.0
+    expose:
+      - 11112
+      - 2762
+      - 2575
+      - 12575
+    ports:
+      - 8080:8080
+      - 8443:8443
+      - 9990:9990
+      - 9993:9993
+    env_file: docker-compose.env
+    environment:
+      WILDFLY_CHOWN: /opt/wildfly/standalone /storage
+      WILDFLY_WAIT_FOR: ldap:389 db:5432
+      HTTP_PROXY_ADDRESS_FORWARDING: 'true'
+      ARCHIVE_HOST: localhost
+    healthcheck:
+      test: "curl -v -X 'GET' 'http://localhost:8080/dcm4chee-arc/aets/DCM4CHEE/rs/studies?ModalitiesInStudy=SM'"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - arc_data:/storage
+    logging:
+      driver: fluentd
+      options:
+        tag: pacs_arc
